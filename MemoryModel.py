@@ -99,6 +99,7 @@ class MemoryModel:
         self.sunCount = 0
         self.timestamp = 0
         self.nextSpawn = 0
+        self.spawnedAt = 0
         self.nZombies = 0
         self.triggerHp = None
 
@@ -111,17 +112,22 @@ class MemoryModel:
         self.nGridItems = 0
         self.craters = []
         self.icePath = []
+        self.icePathCountdown = []
 
         self.nZombieWaves = 0
 
         self.cards = {}
+
         self.zombies = []
+        self.minZombieX = [{}, {}, {}, {}, {}, {}]
+        self.maxZombieX = [{}, {}, {}, {}, {}, {}]
+        self.maxZombieHp = [{}, {}, {}, {}, {}, {}]
+        self.hasZombie = {}
 
         self.optrQueue = []
 
         self.strategy = None
 
-        self.hasGigaCurrentWave = False
         self.jackExploding = False
 
         self.newWave = False
@@ -175,6 +181,9 @@ class MemoryModel:
         if self.nextDoomExplodeAt is not None and self.timestamp > self.nextDoomExplodeAt:
             self.nextDoomExplodeAt = None
 
+        if self.newWave:
+            self.spawnedAt = self.timestamp
+
         self.update_crater_info()
         self.update_ice_path_info()
         self.update_item_info()
@@ -219,8 +228,11 @@ class MemoryModel:
 
     def update_ice_path_info(self):
         self.icePath = [0 for i in range(0, 6)]
+        self.icePathCountdown = [0 for i in range(0, 6)]
+
         for i in [0, 1, 4, 5]:
             self.icePath[i] = self.read_memory_from_base(ctypes.c_int32(), 0x60c + 4 * i)
+            self.icePathCountdown[i] = self.read_memory_from_base(ctypes.c_int32(), 0x624 + 4 * i)
             for col, edge in enumerate(MemoryModel.ICE_PATH_LIMIT):
                 if self.icePath[i] < edge:
                     for j in range(col, 9):
@@ -272,43 +284,66 @@ class MemoryModel:
         self.zombies = []
         self.jackExploding = False
 
-        t = 0
+        for i in range(0, 33):
+            self.hasZombie[i] = False
+
+        for row in range(0, 6):
+            for zombie_type in range(0, 33):
+                self.minZombieX[row][zombie_type] = None
+                self.maxZombieX[row][zombie_type] = None
+                self.maxZombieHp[row][zombie_type] = None
+
         for i in range(0, self.read_int32_from_base(0x94)):
             disappeared = read_game_memory(ctypes.c_uint8(), self.zombieBase + 0xec + 0x15c * i)
             living = read_game_memory(ctypes.c_uint8(), self.zombieBase + 0xba + 0x15c * i)
 
             hp = read_game_memory(ctypes.c_int32(), self.zombieBase + 0xc8 + 0x15c * i)
-            hp1 = read_game_memory(ctypes.c_int32(), self.zombieBase + 0xd0 + 0x15c * i)
-            hp2 = read_game_memory(ctypes.c_int32(), self.zombieBase + 0xdc + 0x15c * i)
 
-            spawn_at = read_game_memory(ctypes.c_int32(), self.zombieBase + 0x6c + 0x15c * i)
             status = read_game_memory(ctypes.c_int32(), self.zombieBase + 0x28 + 0x15c * i)
             if status in [1, 2, 3] or read_game_memory(ctypes.c_uint8(), self.zombieBase + 0x24 + 0x15c * i) in [9, 20, 24]:
                 continue
 
-            if spawn_at == self.nZombieWaves - 1 and hp > 0 and disappeared == 0 and living:
-                t += hp + hp1 + hp2 * 0.2
+            zombie_type = read_game_memory(ctypes.c_uint8(), self.zombieBase + 0x24 + 0x15c * i)
+            if zombie_type not in range(0, 33):
+                continue
+
+            row = read_game_memory(ctypes.c_uint8(), self.zombieBase + 0x1c + 0x15c * i)
+            if row not in range(0, 6):
+                continue
 
             if disappeared != 0 or hp < 1 or not living:
                 continue
 
-            self.zombies.append(Zombie(
+            zombie = Zombie(
                     hp=hp,
                     x=read_game_memory(ctypes.c_float(), self.zombieBase + 0x2c + 0x15c * i),
                     y=read_game_memory(ctypes.c_float(), self.zombieBase + 0x30 + 0x15c * i),
-                    row=read_game_memory(ctypes.c_uint8(), self.zombieBase + 0x1c + 0x15c * i),
-                    zombie_type=read_game_memory(ctypes.c_uint8(), self.zombieBase + 0x24 + 0x15c * i)
-            ))
+                    row=row,
+                    zombie_type=zombie_type
+            )
+            self.zombies.append(zombie)
 
-            if self.zombies[-1].type == Zombie.GIGA_GARGANTUAR and self.newWave:
-                if read_game_memory(ctypes.c_float(), self.zombieBase + 0x60 + 0x15c * i) < 100:
-                    self.hasGigaCurrentWave = True
+            if self.minZombieX[zombie.row][zombie.type] is None:
+                self.minZombieX[zombie.row][zombie.type] = zombie.x
+            elif self.minZombieX[zombie.row][zombie.type] > zombie.x:
+                self.minZombieX[zombie.row][zombie.type] = zombie.x
 
-            if self.zombies[-1].type == Zombie.JACK_IN_THE_BOX and\
-                    read_game_memory(ctypes.c_uint8(), self.zombieBase + 0x28 + 0x15c * i) == 16:
+            if self.maxZombieX[zombie.row][zombie.type] is None:
+                self.maxZombieX[zombie.row][zombie.type] = zombie.x
+            elif self.maxZombieX[zombie.row][zombie.type] < zombie.x:
+                self.maxZombieX[zombie.row][zombie.type] = zombie.x
+
+            if self.maxZombieHp[zombie.row][zombie.type] is None:
+                self.maxZombieHp[zombie.row][zombie.type] = zombie.hp
+            elif self.maxZombieHp[zombie.row][zombie.type] < zombie.hp:
+                self.maxZombieHp[zombie.row][zombie.type] = zombie.hp
+
+            zombie_status = read_game_memory(ctypes.c_float(), self.zombieBase + 0x60 + 0x15c * i)
+            if zombie_status < 100:
+                self.hasZombie[zombie.type] = True
+
+            if zombie.type == Zombie.JACK_IN_THE_BOX and zombie_status == 16:
                 self.jackExploding = True
-        with open("C:\\Users\\liutao\\Desktop\\test.csv", "a") as f:
-            f.write(str(self.timestamp) + "," + str(t) + "\n")
 
     def update_card_info(self):
         self.cards = {}
